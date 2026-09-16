@@ -28,6 +28,7 @@ LINE_USER_ID = os.getenv("LINE_USER_ID", "U1f8fde04d26c2798361c804bec20c175")
 
 # In-memory queues for bridging to local trading engine
 PENDING_TASKS: List[Dict[str, Any]] = []
+APPROVAL_EVENTS: List[Dict[str, Any]] = []
 EXECUTED_RESULTS: List[Dict[str, Any]] = []
 
 
@@ -60,7 +61,8 @@ def health():
         "status": "online",
         "service": "Cloud LINE Webhook Assistant",
         "time": datetime.datetime.now().isoformat(),
-        "pending_tasks_count": len(PENDING_TASKS)
+        "pending_tasks_count": len(PENDING_TASKS),
+        "approval_events_count": len(APPROVAL_EVENTS)
     }
 
 
@@ -122,15 +124,32 @@ async def handle_webhook(request: Request, x_line_signature: Optional[str] = Hea
                 user_text = msg.get("text", "").strip()
                 logging.info(f"Received text command: {user_text}")
 
-                task_item = {
-                    "id": f"task_{int(time.time()*1000)}",
-                    "type": "COMMAND",
-                    "text": user_text,
-                    "reply_token": reply_token,
-                    "timestamp": time.time(),
-                    "status": "QUEUED"
-                }
-                PENDING_TASKS.append(task_item)
+                normalized = " ".join(user_text.lower().split())
+                parts = normalized.split(" ") if normalized else []
+                is_approval_reply = bool(parts) and parts[0] in {"ok", "no"} and len(parts) <= 2
+
+                if is_approval_reply:
+                    approval_event = {
+                        "id": f"approval_{int(time.time()*1000)}",
+                        "type": "APPROVAL_REPLY",
+                        "text": user_text,
+                        "user_id": user_id,
+                        "reply_token": reply_token,
+                        "timestamp": time.time(),
+                        "status": "QUEUED"
+                    }
+                    APPROVAL_EVENTS.append(approval_event)
+                    reply_line_message(reply_token, "已收到審核回覆，等待本機 Approval Gate 確認。")
+                else:
+                    task_item = {
+                        "id": f"task_{int(time.time()*1000)}",
+                        "type": "COMMAND",
+                        "text": user_text,
+                        "reply_token": reply_token,
+                        "timestamp": time.time(),
+                        "status": "QUEUED"
+                    }
+                    PENDING_TASKS.append(task_item)
 
     return Response(content="OK", status_code=200)
 
@@ -142,6 +161,15 @@ def poll_tasks(secret_key: Optional[str] = None):
     tasks = list(PENDING_TASKS)
     PENDING_TASKS.clear()
     return {"tasks": tasks}
+
+
+@app.get("/api/approvals/poll")
+def poll_approvals(secret_key: Optional[str] = None):
+    """Local AI Orchestration approval bridge polls LINE ok/no replies here."""
+    global APPROVAL_EVENTS
+    events = list(APPROVAL_EVENTS)
+    APPROVAL_EVENTS.clear()
+    return {"events": events}
 
 
 if __name__ == "__main__":
